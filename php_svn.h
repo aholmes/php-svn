@@ -28,7 +28,8 @@
 extern zend_module_entry svn_module_entry;
 #define phpext_svn_ptr &svn_module_entry
 
-#define PHP_SVN_VERSION "1.0.2"
+#define PHP_SVN_VERSION "2.0"
+#define _PHP_SVN_VERSION 20
 
 #ifdef PHP_WIN32
 #define PHP_SVN_API __declspec(dllexport)
@@ -48,6 +49,7 @@ PHP_RINIT_FUNCTION(svn);
 PHP_RSHUTDOWN_FUNCTION(svn);
 PHP_MINFO_FUNCTION(svn);
 
+PHP_FUNCTION(svn_merge);
 PHP_FUNCTION(svn_checkout);
 PHP_FUNCTION(svn_cat);
 PHP_FUNCTION(svn_ls);
@@ -127,6 +129,7 @@ PHP_FUNCTION(svn_uuid_from_path);
 #define SVN_REVISION_COMMITTED -3
 #define SVN_REVISION_PREV -4
 #define SVN_REVISION_UNSPECIFIED -5
+#define SVN_REVISION_WORKING -6
 
 #define SVN_NON_RECURSIVE 1 /* --non-recursive */
 #define SVN_DISCOVER_CHANGED_PATHS 2 /* --verbose */
@@ -136,6 +139,7 @@ PHP_FUNCTION(svn_uuid_from_path);
 #define SVN_SHOW_UPDATES 32 /* --show-updates */
 #define SVN_NO_IGNORE 64 /* --no-ignore */
 #define SVN_IGNORE_EXTERNALS 128 /* --ignore-externals */
+#define SVN_INCLUDE_MERGED_REVISIONS 256 /* --use-merge-history */
 
 
 

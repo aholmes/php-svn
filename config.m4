@@ -22,6 +22,7 @@ if test "$PHP_SVN" != "no"; then
 			SVN_VER_MAJOR=`grep '#define SVN_VER_MAJOR' $SVN_DIR/svn_version.h|$SED 's/#define SVN_VER_MAJOR[ \t]*//;s/[ \t]*$//'`
 			SVN_VER_MINOR=`grep '#define SVN_VER_MINOR' $SVN_DIR/svn_version.h|$SED 's/#define SVN_VER_MINOR[ \t]*//;s/[ \t]*$//'`
 			SVN_VER_PATCH=`grep '#define SVN_VER_PATCH' $SVN_DIR/svn_version.h|$SED 's/#define SVN_VER_PATCH[ \t]*//;s/[ \t]*$//'`
+			AC_DEFINE_UNQUOTED(SVN_VER, ${SVN_VER_MAJOR}${SVN_VER_MINOR}, "Numerical major/minor version of SVN API")
 			AC_MSG_RESULT(Found libsvn $SVN_VER_MAJOR.$SVN_VER_MINOR.$SVN_VER_PATCH)
 			break;
 		fi

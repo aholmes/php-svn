@@ -85,6 +85,17 @@ struct php_svn_log_receiver_baton {
 	svn_boolean_t omit_messages;
 };
 
+typedef struct php_svn_list_entry {
+	svn_dirent_t *dirent;
+	char *entryname;
+} php_svn_list_entry;
+
+typedef struct php_svn_list_receiver_baton {
+	svn_boolean_t verbose;
+	svn_client_ctx_t *ctx;
+	apr_array_header_t *entries;
+} php_svn_list_receiver_baton;
+
 /* class entry constants */
 static zend_class_entry *ce_Svn;
 
@@ -125,6 +136,34 @@ static ZEND_RSRC_DTOR_FUNC(php_svn_repos_fs_txn_dtor)
 	efree(r);
 }
 
+static int replicate_array(void *pDest TSRMLS_DC, int num_args, va_list args, zend_hash_key *key)
+{
+	zval **val = (zval **)pDest;
+	apr_pool_t *pool = (apr_pool_t*)va_arg(args, apr_pool_t*);
+	apr_array_header_t *arr = (apr_array_header_t*)va_arg(args, apr_array_header_t*);
+
+	if (Z_TYPE_PP(val) == IS_STRING) {
+		APR_ARRAY_PUSH(arr, const char*) = apr_pstrdup(pool, Z_STRVAL_PP(val));
+	} else if (Z_TYPE_PP(val) == IS_LONG) {
+		APR_ARRAY_PUSH(arr, long) = Z_LVAL_PP(val);
+	}
+
+	va_end(args);
+
+	return ZEND_HASH_APPLY_KEEP;
+}
+
+static apr_array_header_t *replicate_zend_hash_to_apr_array(zval *arr, apr_pool_t *pool TSRMLS_DC, size_t size)
+{
+	apr_array_header_t *apr_arr = apr_array_make(pool, zend_hash_num_elements(Z_ARRVAL_P(arr)), sizeof(size));
+
+	if (!apr_arr) return NULL;
+
+	zend_hash_apply_with_arguments(Z_ARRVAL_P(arr) TSRMLS_CC, replicate_array, 2, pool, apr_arr);
+
+	return apr_arr;
+}
+
 #define SVN_STATIC_ME(name) ZEND_FENTRY(name, ZEND_FN(svn_ ## name), NULL, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 /** Fixme = this list needs padding out... */
 static zend_function_entry svn_methods[] = {
@@ -136,9 +175,99 @@ static zend_function_entry svn_methods[] = {
 	{NULL, NULL, NULL}
 };
 
+#if SVN_VER >= 16
+// TODO implement this
+static svn_error_t* svn_client_list_func(void *baton, const char *path, const svn_dirent_t *dirent, const svn_lock_t *lock, const char *abs_path, apr_pool_t *pool) {
+	// TODO will eventuall be this, and we manage the array of php_svn_list_entry. but for testing, just make php_svn_list_entry work
+	php_svn_list_receiver_baton *lbaton = (php_svn_list_receiver_baton *)baton;
+	//struct php_svn_list_entry *lbaton = (struct php_svn_list_entry *)baton;
+	php_svn_list_entry *entry;
+	const char *entryname;
+	char *full_entryname;
+
+	// FIXME use SVN_ERR
+	if (lbaton->ctx->cancel_func) {
+		return NULL;
+	}
+
+	if (strcmp(path, "") == 0) {
+		if (dirent->kind == svn_node_file)
+			entryname = svn_dirent_basename(abs_path, pool);
+		else if (lbaton->verbose)
+			entryname = ".";
+		else
+			/* Don't bother to list if no useful information will be shown. */
+			return SVN_NO_ERROR;
+	} else {
+		entryname = path;
+	}
+
+	// TODO verbose output
+	// if (pb->verbose) {
+  //    apr_time_t now = apr_time_now();
+  //    apr_time_exp_t exp_time;
+  //    apr_status_t apr_err;
+  //    apr_size_t size;
+  //    char timestr[20];
+  //    const char *sizestr, *utf8_timestr;
+
+  //    /* svn_time_to_human_cstring gives us something *way* too long
+  //       to use for this, so we have to roll our own.  We include
+  //       the year if the entry's time is not within half a year. */
+  //    apr_time_exp_lt(&exp_time, dirent->time);
+  //    if (apr_time_sec(now - dirent->time) < (365 * 86400 / 2)
+  //        && apr_time_sec(dirent->time - now) < (365 * 86400 / 2))
+  //      {
+  //        apr_err = apr_strftime(timestr, &size, sizeof(timestr),
+  //                               _("%b %d %H:%M"), &exp_time);
+  //      }
+  //    else
+  //      {
+  //        apr_err = apr_strftime(timestr, &size, sizeof(timestr),
+  //                               _("%b %d  %Y"), &exp_time);
+  //      }
+
+  //    /* if that failed, just zero out the string and print nothing */
+  //    if (apr_err)
+  //      timestr[0] = '\0';
+
+  //    /* we need it in UTF-8. */
+  //    SVN_ERR(svn_utf_cstring_to_utf8(&utf8_timestr, timestr, pool));
+
+  //    sizestr = apr_psprintf(pool, "%" SVN_FILESIZE_T_FMT, dirent->size);
+
+  //    return svn_cmdline_printf
+  //            (pool, "%7ld %-8.8s %c %10s %12s %s%s\n",
+  //             dirent->created_rev,
+  //             dirent->last_author ? dirent->last_author : " ? ",
+  //             lock ? 'O' : ' ',
+  //             (dirent->kind == svn_node_file) ? sizestr : "",
+  //             utf8_timestr,
+  //             entryname,
+  //             (dirent->kind == svn_node_dir) ? "/" : "");
+	// } else {
+		entry = safe_emalloc(1, sizeof(php_svn_list_entry), 0);
+
+		entry->dirent = (svn_dirent_t *)dirent;
+
+		full_entryname = safe_emalloc(1, strlen(entryname), 1);
+		strcpy(full_entryname, entryname);
+		strcat(full_entryname, (dirent->kind == svn_node_dir) ? "/" : "");
+
+		entry->entryname = safe_emalloc(1, strlen(full_entryname), 1);
+		strcpy(entry->entryname, full_entryname);
+
+		APR_ARRAY_PUSH(lbaton->entries, php_svn_list_entry *) = entry;
+	// }
+
+	return SVN_NO_ERROR;
+}
+#endif
+
 
 /* {{{ svn_functions[] */
 zend_function_entry svn_functions[] = {
+	PHP_FE(svn_merge,		NULL)
 	PHP_FE(svn_checkout,		NULL)
 	PHP_FE(svn_cat,			NULL)
 	PHP_FE(svn_ls,			NULL)
@@ -240,6 +369,8 @@ static enum svn_opt_revision_kind php_svn_get_revision_kind(svn_opt_revision_t r
  			return svn_opt_revision_committed;
  		case SVN_REVISION_PREV:
  			return svn_opt_revision_previous;
+		case SVN_REVISION_WORKING:
+			return svn_opt_revision_working;
  		default:
  			return svn_opt_revision_number;
 	}
@@ -264,7 +395,9 @@ static void php_svn_handle_error(svn_error_t *error TSRMLS_DC)
 		svn_strerror(itr->apr_err, buf, sizeof(buf));
 		smart_str_appendl(&s, buf, strlen(buf));
 		smart_str_appendl(&s, ") ", 2);
-		smart_str_appendl(&s, itr->message, strlen(itr->message));
+		if (itr->message) {
+			smart_str_appendl(&s, itr->message, strlen(itr->message));
+		}
 
 		if (itr->child) {
 			smart_str_appendl(&s, "\n", 1);
@@ -351,23 +484,47 @@ static int init_svn_client(TSRMLS_D)
 
 	/* The main disk-caching auth providers, for both
 	   'username/password' creds and 'username' creds.  */
+#if SVN_VER < 16
 	svn_client_get_simple_provider (&provider, SVN_G(pool));
+#else
+	svn_auth_get_simple_provider2 (&provider, NULL, NULL, SVN_G(pool));
+#endif
 	APR_ARRAY_PUSH (providers, svn_auth_provider_object_t *) = provider;
 
+#if SVN_VER < 16
 	svn_client_get_username_provider (&provider, SVN_G(pool));
+#else
+	svn_auth_get_username_provider (&provider, SVN_G(pool));
+#endif
 	APR_ARRAY_PUSH (providers, svn_auth_provider_object_t *) = provider;
 
+#if SVN_VER < 16
 	svn_client_get_ssl_server_trust_prompt_provider (&provider, php_svn_auth_ssl_client_server_trust_prompter, NULL, SVN_G(pool));
+#else
+	svn_auth_get_ssl_server_trust_prompt_provider (&provider, php_svn_auth_ssl_client_server_trust_prompter, NULL, SVN_G(pool));
+#endif
 	APR_ARRAY_PUSH (providers, svn_auth_provider_object_t *) = provider;
 
 	/* The server-cert, client-cert, and client-cert-password providers. */
+#if SVN_VER < 16
 	svn_client_get_ssl_server_trust_file_provider (&provider, SVN_G(pool));
+#else
+	svn_auth_get_ssl_server_trust_file_provider (&provider, SVN_G(pool));
+#endif
 	APR_ARRAY_PUSH (providers, svn_auth_provider_object_t *) = provider;
 
+#if SVN_VER < 16
 	svn_client_get_ssl_client_cert_file_provider (&provider, SVN_G(pool));
+#else
+	svn_auth_get_ssl_client_cert_file_provider (&provider, SVN_G(pool));
+#endif
 	APR_ARRAY_PUSH (providers, svn_auth_provider_object_t *) = provider;
 
+#if SVN_VER < 16
 	svn_client_get_ssl_client_cert_pw_file_provider (&provider, SVN_G(pool));
+#else
+	svn_auth_get_ssl_client_cert_pw_file_provider2 (&provider, NULL, NULL, SVN_G(pool));
+#endif
 	APR_ARRAY_PUSH (providers, svn_auth_provider_object_t *) = provider;
 
 
@@ -451,7 +608,14 @@ PHP_FUNCTION(svn_config_ensure)
 
 	if (config_path) {
 		svn_utf_cstring_to_utf8 (&utf8_path, config_path, subpool);
+#if SVN_VER < 16
 		config_path = svn_path_canonicalize(utf8_path, subpool);
+#else
+		if (svn_path_is_url(utf8_path))
+			config_path = svn_uri_canonicalize(utf8_path, subpool);
+		else
+			config_path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 	}
 
 	err = svn_config_ensure(config_path, subpool);
@@ -492,10 +656,24 @@ PHP_FUNCTION(svn_import)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
+#if SVN_VER < 16
 	err = svn_client_import(&commit_info_p, path, url, nonrecursive,
+			(svn_boolean_t)0, (svn_boolean_t)0, NULL, NULL, NULL,
 			SVN_G(ctx), subpool);
+#else
+	err = svn_client_import4(path, url, svn_depth_infinity,
+			(svn_boolean_t)0, (svn_boolean_t)0, NULL, NULL, NULL,
+			SVN_G(ctx), subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error (err TSRMLS_CC);
@@ -550,6 +728,7 @@ PHP_MINIT_FUNCTION(svn)
 	CLASS_CONST_LONG(Svn, "DISCOVER_CHANGED_PATHS", SVN_DISCOVER_CHANGED_PATHS);
 	CLASS_CONST_LONG(Svn, "OMIT_MESSAGES", SVN_OMIT_MESSAGES);
 	CLASS_CONST_LONG(Svn, "STOP_ON_COPY", SVN_STOP_ON_COPY);
+	CLASS_CONST_LONG(Svn, "SVN_INCLUDE_MERGED_REVISIONS", SVN_INCLUDE_MERGED_REVISIONS);
 	CLASS_CONST_LONG(Svn, "ALL", SVN_ALL);
 	CLASS_CONST_LONG(Svn, "SHOW_UPDATES", SVN_SHOW_UPDATES);
 	CLASS_CONST_LONG(Svn, "NO_IGNORE", SVN_NO_IGNORE);
@@ -561,6 +740,7 @@ PHP_MINIT_FUNCTION(svn)
 	CLASS_CONST_LONG(Svn, "COMMITTED", SVN_REVISION_COMMITTED);
 	CLASS_CONST_LONG(Svn, "PREV", SVN_REVISION_PREV);
 	CLASS_CONST_LONG(Svn, "UNSPECIFIED", SVN_REVISION_UNSPECIFIED);
+	CLASS_CONST_LONG(Svn, "WORKING", SVN_REVISION_WORKING);
 
 
 	CLASS_CONST_LONG(SvnWc, "NONE", svn_wc_status_none);
@@ -614,11 +794,13 @@ PHP_MINIT_FUNCTION(svn)
 	REGISTER_LONG_CONSTANT("SVN_REVISION_COMMITTED", SVN_REVISION_COMMITTED, CONST_CS|CONST_PERSISTENT);
 	REGISTER_LONG_CONSTANT("SVN_REVISION_PREV", SVN_REVISION_PREV, CONST_CS|CONST_PERSISTENT);
 	REGISTER_LONG_CONSTANT("SVN_REVISION_UNSPECIFIED", SVN_REVISION_UNSPECIFIED, CONST_CS|CONST_PERSISTENT);
+	REGISTER_LONG_CONSTANT("SVN_REVISION_WORKING", SVN_REVISION_WORKING, CONST_CS|CONST_PERSISTENT);
 
 	REGISTER_LONG_CONSTANT("SVN_NON_RECURSIVE", SVN_NON_RECURSIVE, CONST_CS|CONST_PERSISTENT);   /* --non-recursive */
 	REGISTER_LONG_CONSTANT("SVN_DISCOVER_CHANGED_PATHS", SVN_DISCOVER_CHANGED_PATHS, CONST_CS|CONST_PERSISTENT);    /* --verbose */
 	REGISTER_LONG_CONSTANT("SVN_OMIT_MESSAGES", SVN_OMIT_MESSAGES, CONST_CS|CONST_PERSISTENT);    /* --quiet */
 	REGISTER_LONG_CONSTANT("SVN_STOP_ON_COPY", SVN_STOP_ON_COPY, CONST_CS|CONST_PERSISTENT);    /* --stop-on-copy */
+	REGISTER_LONG_CONSTANT("SVN_INCLUDE_MERGED_REVISIONS", SVN_INCLUDE_MERGED_REVISIONS, CONST_CS|CONST_PERSISTENT);    /* --use-merge-history */
 	REGISTER_LONG_CONSTANT("SVN_ALL", SVN_ALL, CONST_CS|CONST_PERSISTENT);    /* --verbose in svn status */
 	REGISTER_LONG_CONSTANT("SVN_SHOW_UPDATES", SVN_SHOW_UPDATES, CONST_CS|CONST_PERSISTENT);   /* --show-updates */
 	REGISTER_LONG_CONSTANT("SVN_NO_IGNORE", SVN_NO_IGNORE, CONST_CS|CONST_PERSISTENT);   /* --no-ignore */
@@ -697,6 +879,178 @@ PHP_MINFO_FUNCTION(svn)
 }
 /* }}} */
 
+/* {{{ proto bool svn_merge(string repository_url, string target_path [, mixed revision = SVN_REVISION_HEAD [, int end_revision [, int flags]]])
+	Checks out a particular revision from a repository into target_path.
+
+	svn_merge(source url, target url) // merge all missing revisions
+	svn_merge(source url, target url, revision) // merge one revision
+	svn_merge(source url, target url, revision, end_revision) // merge range of revisions
+
+	svn_merge(source url, target url, array(revision1, revision2, ...)) // merge array of revisions
+
+	svn_merge(source url, target url, mixed int|array revision=0, int end_revision=0)
+	*/
+PHP_FUNCTION(svn_merge)
+{
+	char *repos_url = NULL, *target_path = NULL;
+	const char *utf8_repos_url = NULL, *utf8_target_path = NULL;
+	const char *can_repos_url = NULL, *can_target_path = NULL;
+	int repos_url_len, target_path_len;
+	svn_error_t *err;
+	svn_opt_revision_t revision = { 0 }, end_revision = { 0 }, peg_revision;
+	long flags = 0;
+	apr_pool_t *subpool;
+	const char *true_path;
+	zval *revisions = NULL;
+	apr_array_header_t *revisions_array;
+	int i;
+
+	revision.value.number = svn_opt_revision_unspecified;
+	peg_revision.kind = svn_opt_revision_head;
+
+	if (FAILURE == zend_parse_parameters_ex(ZEND_PARSE_PARAMS_QUIET, ZEND_NUM_ARGS() TSRMLS_CC, "ss|ll",
+				&repos_url, &repos_url_len, &target_path, &target_path_len, &revision.value.number, &end_revision.value.number)) {
+		if (FAILURE == zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ssa|l",
+					&repos_url, &repos_url_len, &target_path, &target_path_len, &revisions, &end_revision.value.number)) {
+			return;
+		}
+	}
+
+	PHP_SVN_INIT_CLIENT();
+	subpool = svn_pool_create(SVN_G(pool));
+	if (!subpool) {
+		RETURN_FALSE;
+	}
+
+	err = svn_utf_cstring_to_utf8 (&utf8_repos_url, repos_url, subpool);
+	if (err) {
+		php_svn_handle_error(err TSRMLS_CC);
+		RETVAL_FALSE;
+		goto cleanup;
+	}
+	err = svn_utf_cstring_to_utf8 (&utf8_target_path, target_path, subpool);
+	if (err) {
+		php_svn_handle_error(err TSRMLS_CC);
+		RETVAL_FALSE;
+		goto cleanup;
+	}
+
+	if (svn_path_is_url(utf8_repos_url))
+		can_repos_url= svn_uri_canonicalize(utf8_repos_url, subpool);
+	else
+		can_repos_url= svn_dirent_canonicalize(utf8_repos_url, subpool);
+
+	if (svn_path_is_url(utf8_target_path))
+		can_target_path = svn_uri_canonicalize(utf8_target_path, subpool);
+	else
+		can_target_path = svn_dirent_canonicalize(utf8_target_path, subpool);
+
+	// caller passed in an array of revisions to merge
+	if (revisions) {
+		err = svn_opt_parse_path(&peg_revision, &true_path, can_repos_url, subpool);
+		if (err) {
+			php_svn_handle_error (err TSRMLS_CC);
+			RETVAL_FALSE;
+			goto cleanup;
+		}
+
+//		peg_revision.kind = svn_opt_revision_working;
+
+		apr_array_header_t *hash_to_apr = apr_array_make (subpool, 1, sizeof(zval*));
+		// TODO might be nice not to loop on the revisions twice, and make our revision range array while looping on the zval, instead of looping on an array to assemble an array
+		hash_to_apr = replicate_zend_hash_to_apr_array(revisions, subpool TSRMLS_CC, sizeof(zval *));
+
+		svn_opt_revision_range_t *range = apr_palloc(subpool, sizeof(*range));
+		revisions_array = apr_array_make(subpool, 1, sizeof(range));
+
+		svn_revnum_t rev;
+		for (i = 0; i < hash_to_apr->nelts; i++) {
+			rev = APR_ARRAY_IDX(hash_to_apr, i, svn_revnum_t);
+
+			range->start.kind = svn_opt_revision_number;
+			// the range is always one less than the revision we want to merge, up to the revision was want to merge.
+			// TODO copy some of the logic from lines 1718 onward in svn/main.c
+			range->start.value.number = rev - 1;
+			range->end.kind = svn_opt_revision_number;
+			range->end.value.number = rev;
+
+			APR_ARRAY_PUSH(revisions_array, svn_opt_revision_range_t *) = range;
+		}
+
+		// peg the merge to the last revision
+		peg_revision = range->end;
+
+		err = svn_client_merge_peg4(true_path,
+			revisions_array,
+			&peg_revision,
+			can_target_path,
+			svn_depth_unknown,
+			(svn_boolean_t)0, // ignore_ancestry
+			(svn_boolean_t)0, // force
+			(svn_boolean_t)0, // record_only
+			(svn_boolean_t)0, // dry_run
+			(svn_boolean_t)0, // allow_mixed_rev
+			NULL,             // merge_options
+			SVN_G(ctx), subpool);
+	// called passed in a revision, and maybe an end revision
+	} else {
+		err = svn_opt_parse_path(&end_revision, &true_path, can_repos_url, subpool);
+		if (err) {
+			php_svn_handle_error (err TSRMLS_CC);
+			RETVAL_FALSE;
+			goto cleanup;
+		}
+
+		revision.kind = php_svn_get_revision_kind(revision);
+		// svn merges ranges from (wanted revision) - 1 : (end revision)
+		revision.value.number--;
+		peg_revision.kind = svn_opt_revision_head;
+
+		svn_opt_revision_range_t *range = apr_palloc(subpool, sizeof(*range));
+		revisions_array = apr_array_make(subpool, 1, sizeof(range));
+
+		// end_revision is passed through PHP as one of SVN_REVISION_ constants. The are all less than 0. SVN_REVISION_HEAD is the default.
+		if (end_revision.value.number < 0) {
+			end_revision.kind = svn_opt_revision_number;
+			// be sure to actually merge the revision we want, by adding 1 to the previously subtracted number
+			end_revision.value.number = revision.value.number + 1;
+		// if end_revision > 0, then the caller specified a real revision, which has already been stored through zend_parse_parameters
+		} else {
+			end_revision.kind = php_svn_get_revision_kind(end_revision);
+		}
+
+		range->start.kind = svn_opt_revision_number;
+		range->start.value.number = revision.value.number;
+
+		range->end = end_revision;
+
+		APR_ARRAY_PUSH(revisions_array, svn_opt_revision_range_t *) = range;
+
+		err = svn_client_merge_peg4(true_path,
+			revisions_array,
+			&peg_revision,
+			can_target_path,
+			svn_depth_unknown,
+			(svn_boolean_t)0, // ignore_ancestry
+			(svn_boolean_t)0, // force
+			(svn_boolean_t)0, // record_only
+			(svn_boolean_t)0, // dry_run
+			(svn_boolean_t)0, // allow_mixed_rev
+			NULL,             // merge_options
+			SVN_G(ctx), subpool);
+	}
+
+	if (err) {
+		php_svn_handle_error (err TSRMLS_CC);
+		RETVAL_FALSE;
+	} else {
+		RETVAL_TRUE;
+	}
+
+cleanup:
+	svn_pool_destroy(subpool);
+}
+/* }}} */
 
 /* {{{ proto bool svn_checkout(string repository_url, string target_path [, int revision = SVN_REVISION_HEAD [, int flags]])
 	Checks out a particular revision from a repository into target_path. */
@@ -738,8 +1092,17 @@ PHP_FUNCTION(svn_checkout)
 		goto cleanup;
 	}
 
+#if SVN_VER < 16
 	can_repos_url= svn_path_canonicalize(utf8_repos_url, subpool);
 	can_target_path = svn_path_canonicalize(utf8_target_path, subpool);
+#else
+	if (svn_path_is_url(utf8_repos_url))
+		can_repos_url= svn_uri_canonicalize(utf8_repos_url, subpool);
+	else
+		can_repos_url= svn_dirent_canonicalize(utf8_repos_url, subpool);
+
+	can_target_path = svn_dirent_canonicalize(utf8_target_path, subpool);
+#endif
 
 	revision.kind = php_svn_get_revision_kind(revision);
 
@@ -750,6 +1113,7 @@ PHP_FUNCTION(svn_checkout)
 		goto cleanup;
 	}
 
+#if SVN_VER < 16
 	err = svn_client_checkout2 (NULL,
 			true_path,
 			can_target_path,
@@ -759,6 +1123,18 @@ PHP_FUNCTION(svn_checkout)
 			flags & SVN_IGNORE_EXTERNALS,
 			SVN_G(ctx),
 			subpool);
+#else
+	err = svn_client_checkout3 (NULL,
+			true_path,
+			can_target_path,
+			&peg_revision,
+			&revision,
+			(flags & SVN_NON_RECURSIVE) ? svn_depth_files : svn_depth_infinity,
+			flags & SVN_IGNORE_EXTERNALS,
+			(svn_boolean_t)0,
+			SVN_G(ctx),
+			subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error (err TSRMLS_CC);
@@ -822,7 +1198,14 @@ PHP_FUNCTION(svn_cat)
 		goto cleanup;
 	}
 
+#if SVN_VER < 16
 	url = svn_path_canonicalize(utf8_url, subpool);
+#else
+	if (svn_path_is_url(utf8_url))
+		url = svn_uri_canonicalize(utf8_url, subpool);
+	else
+		url = svn_dirent_canonicalize(utf8_url, subpool);
+#endif
 
 	err = svn_opt_parse_path(&peg_revision, &true_path, url, subpool);
 	if (err) {
@@ -864,15 +1247,21 @@ PHP_FUNCTION(svn_ls)
 	const char *repos_url = NULL;
 	const char *utf8_repos_url = NULL;
 	int repos_url_len;
-	zend_bool recurse = 0, peg = 0;
+#if defined(_PHP_SVN_VERSION) && _PHP_SVN_VERSION == 20
+	zend_bool recurse = 1;
+#else
+	zend_bool recurse = 0;
+#endif
+	zend_bool peg = 0;
 	svn_error_t *err;
 	svn_opt_revision_t revision = { 0 };
 	apr_hash_t *dirents;
 	apr_array_header_t *array;
-	int i;
 	apr_pool_t *subpool;
 	svn_opt_revision_t peg_revision;
 	const char *true_path;
+	php_svn_list_entry *entry;
+	int i;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|lbb",
 			&repos_url, &repos_url_len, &revision.value.number, &recurse, &peg) == FAILURE) {
@@ -892,7 +1281,14 @@ PHP_FUNCTION(svn_ls)
 		goto cleanup;
 	}
 
+#if SVN_VER < 16
 	repos_url = svn_path_canonicalize(utf8_repos_url, subpool);
+#else
+	if (svn_path_is_url(utf8_repos_url))
+		repos_url = svn_uri_canonicalize(utf8_repos_url, subpool);
+	else
+		repos_url = svn_dirent_canonicalize(utf8_repos_url, subpool);
+#endif
 
 	revision.kind = php_svn_get_revision_kind(revision); 
 
@@ -903,12 +1299,29 @@ PHP_FUNCTION(svn_ls)
 		goto cleanup;
 	}
 
+#if SVN_VER < 16
 	err = svn_client_ls2 (&dirents,
 		true_path,
 		&peg_revision,
 		&revision,
 		recurse,
 		SVN_G(ctx), subpool);
+#else
+	php_svn_list_receiver_baton baton;
+	baton.ctx = SVN_G(ctx);
+	baton.verbose = (svn_boolean_t)1;
+	baton.entries = apr_array_make(subpool, 1, sizeof(php_svn_list_entry *));
+
+	err = svn_client_list2 (true_path,
+		&peg_revision,
+		&revision,
+		recurse ? svn_depth_immediates : svn_depth_files,
+		SVN_DIRENT_ALL,
+		(svn_boolean_t)0,
+		svn_client_list_func,
+		&baton,
+		SVN_G(ctx), subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -916,6 +1329,7 @@ PHP_FUNCTION(svn_ls)
 		goto cleanup;
 	}
 
+#if SVN_VER < 16
 	array = svn_sort__hash (dirents, svn_sort_compare_items_as_paths, subpool);
 	array_init(return_value);
 
@@ -971,13 +1385,22 @@ PHP_FUNCTION(svn_ls)
 
 		add_assoc_zval(return_value, (char *)utf8_entryname, row);
 	}
+#else
+	array_init(return_value);
+
+	for (i = 0; i < baton.entries->nelts; i++) {
+		entry = APR_ARRAY_IDX(baton.entries, i, php_svn_list_entry *);
+
+		add_index_string(return_value, i, entry->entryname, 1);
+	}
+#endif
 
 cleanup:
 	svn_pool_destroy(subpool);
-
 }
 /* }}} */
 
+#if SVN_VER < 16
 static svn_error_t *
 php_svn_log_receiver (	void *ibaton,
 				apr_hash_t *changed_paths,
@@ -986,6 +1409,12 @@ php_svn_log_receiver (	void *ibaton,
 				const char *date,
 				const char *msg,
 				apr_pool_t *pool)
+#else
+static svn_error_t *
+php_svn_log_receiver (	void *ibaton,
+				svn_log_entry_t *log_entry,
+				apr_pool_t *pool)
+#endif
 {
 	struct php_svn_log_receiver_baton *baton = (struct php_svn_log_receiver_baton*) ibaton;
 	zval  *row, *paths;
@@ -993,31 +1422,65 @@ php_svn_log_receiver (	void *ibaton,
 	int i;
 	TSRMLS_FETCH();
 
+#if SVN_VER < 16
 	if (rev == 0) {
+#else
+	if (log_entry->revision == 0) {
+#endif
 		return SVN_NO_ERROR;
 	}
 
 	MAKE_STD_ZVAL(row);
 	array_init(row);
+#if SVN_VER < 16
 	add_assoc_long(row, "rev", (long) rev);
+#else
+	add_assoc_long(row, "rev", (long) log_entry->revision);
+#endif
 
+#if SVN_VER < 16
 	if (author) {
 		add_assoc_string(row, "author", (char *) author, 1);
 	}
+
 	if (!baton->omit_messages && msg) {
 		add_assoc_string(row, "msg", (char *) msg, 1);
 	}
+
 	if (date) {
 		add_assoc_string(row, "date", (char *) date, 1);
 	}
+#else
+	if (log_entry->revprops) {
+		apr_hash_index_t *index;
 
+		for (index = apr_hash_first(pool, log_entry->revprops);
+				index != NULL;
+				index = apr_hash_next(index)) {
+			const char *key;
+			svn_string_t *prop;
+
+			apr_hash_this(index, (const void**)&key, NULL, (void**)&prop);
+
+			// strip "svn:" from the beginning of key
+			add_assoc_string(row, strchr(key, ':')+1, (char *)prop->data, 1);
+		}
+	}
+#endif
+
+#if SVN_VER < 16
 	if (changed_paths) {
-
-
+#else
+	if (log_entry->changed_paths2) {
+#endif
 		MAKE_STD_ZVAL(paths);
 		array_init(paths);
 
+#if SVN_VER < 16
 		sorted_paths = svn_sort__hash(changed_paths, svn_sort_compare_items_as_paths, pool);
+#else
+		sorted_paths = svn_sort__hash(log_entry->changed_paths2, svn_sort_compare_items_as_paths, pool);
+#endif
 
 		for (i = 0; i < sorted_paths->nelts; i++)
 		{
@@ -1030,7 +1493,11 @@ php_svn_log_receiver (	void *ibaton,
 			array_init(zpaths);
 			item = &(APR_ARRAY_IDX (sorted_paths, i, svn_sort__item_t));
 			path = item->key;
+#if SVN_VER < 16
 			log_item = apr_hash_get (changed_paths, item->key, item->klen);
+#else
+			log_item = apr_hash_get (log_entry->changed_paths2, item->key, item->klen);
+#endif
 
 			add_assoc_stringl(zpaths, "action", &(log_item->action), 1,1);
 			add_assoc_string(zpaths, "path", (char *) item->key, 1);
@@ -1088,6 +1555,20 @@ PHP_FUNCTION(svn_log)
 	}
 	RETVAL_FALSE;
 
+#if SVN_VER >= 16
+	apr_array_header_t *revision_ranges;
+	svn_opt_revision_range_t *range;
+
+	range = apr_palloc(subpool, sizeof (svn_opt_revision_range_t));
+	range->start = start_revision;
+	range->end = end_revision;
+
+	revision_ranges = apr_array_make(subpool, 1, sizeof(svn_opt_revision_range_t *));
+
+	APR_ARRAY_PUSH(revision_ranges, svn_opt_revision_range_t *) = range;
+#endif
+
+
 	err = svn_utf_cstring_to_utf8 (&utf8_url, url, subpool);
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -1109,7 +1590,14 @@ PHP_FUNCTION(svn_log)
  		end_revision.kind = php_svn_get_revision_kind(end_revision);
  	}
 
+#if SVN_VER < 16
 	url = svn_path_canonicalize(utf8_url, subpool);
+#else
+	if (svn_path_is_url(utf8_url))
+		url = svn_uri_canonicalize(utf8_url, subpool);
+	else
+		url = svn_dirent_canonicalize(utf8_url, subpool);
+#endif
 
 	err = svn_opt_parse_path(&peg_revision, &true_path, url, subpool);
 	if (err) {
@@ -1125,6 +1613,7 @@ PHP_FUNCTION(svn_log)
 	baton.result = (zval *)return_value;
 	baton.omit_messages = flags & SVN_OMIT_MESSAGES;
 
+#if SVN_VER < 16
 	err = svn_client_log3(
 		targets,
 		&peg_revision,
@@ -1136,6 +1625,20 @@ PHP_FUNCTION(svn_log)
 		php_svn_log_receiver,
 		(void *) &baton,
 		SVN_G(ctx), subpool);
+#else
+	err = svn_client_log5(
+		targets,
+		&peg_revision,
+		revision_ranges,
+		limit,
+		flags & SVN_DISCOVER_CHANGED_PATHS,
+		flags & SVN_STOP_ON_COPY,
+		flags & SVN_INCLUDE_MERGED_REVISIONS,
+		NULL,
+		php_svn_log_receiver,
+		(void *) &baton,
+		SVN_G(ctx), subpool);
+#endif
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
 		RETVAL_FALSE;
@@ -1280,9 +1783,22 @@ PHP_FUNCTION(svn_diff)
 		goto cleanup;
 	}
 
+#if SVN_VER < 16
 	can_path1= svn_path_canonicalize(utf8_path1, subpool);
 	can_path2= svn_path_canonicalize(utf8_path2, subpool);
+#else
+	if (svn_path_is_url(utf8_path1))
+		can_path1= svn_uri_canonicalize(utf8_path1, subpool);
+	else
+		can_path1= svn_dirent_canonicalize(utf8_path1, subpool);
 
+	if (svn_path_is_url(utf8_path2))
+		can_path2= svn_uri_canonicalize(utf8_path2, subpool);
+	else
+		can_path2= svn_dirent_canonicalize(utf8_path2, subpool);
+#endif
+
+#if SVN_VER < 16
 	err = svn_client_diff3(&diff_options,
 			can_path1, &revision1,
 			can_path2, &revision2,
@@ -1293,6 +1809,35 @@ PHP_FUNCTION(svn_diff)
 			APR_LOCALE_CHARSET, /* header encoding, for 1.4+ use SVN_APR_LOCALE_CHARSET */
 			outfile, errfile,
 			SVN_G(ctx), subpool);
+#elif SVN_VER == 16
+	err = svn_client_diff4(&diff_options,
+			can_path1, &revision1,
+			can_path2, &revision2,
+			NULL,
+			svn_depth_infinity, /* recurse */
+			(svn_boolean_t)0, /* ignore_ancestry */
+			(svn_boolean_t)0, /* no diff deleted */
+			ignore_content_type,
+			APR_LOCALE_CHARSET, /* header encoding, for 1.4+ use SVN_APR_LOCALE_CHARSET */
+			outfile, errfile,
+			NULL, /* changelist filtering */
+			SVN_G(ctx), subpool);
+#else
+	err = svn_client_diff5(&diff_options,
+			can_path1, &revision1,
+			can_path2, &revision2,
+			NULL,
+			svn_depth_infinity, /* recurse */
+			(svn_boolean_t)0, /* ignore_ancestry */
+			(svn_boolean_t)0, /* no diff deleted */
+			(svn_boolean_t)0, /* show copes as adds */
+			ignore_content_type,
+			(svn_boolean_t)0, /* use git diff format */
+			APR_LOCALE_CHARSET, /* header encoding, for 1.4+ use SVN_APR_LOCALE_CHARSET */
+			outfile, errfile,
+			NULL, /* changelist filtering */
+			SVN_G(ctx), subpool);
+#endif
 
 	if (err) {
 		apr_file_close(errfile);
@@ -1347,7 +1892,14 @@ PHP_FUNCTION(svn_cleanup)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_workingdir, workingdir, subpool);
+#if SVN_VER < 16
 	workingdir = svn_path_canonicalize(utf8_workingdir, subpool);
+#else
+	if (svn_path_is_url(utf8_workingdir))
+		workingdir = svn_uri_canonicalize(utf8_workingdir, subpool);
+	else
+		workingdir = svn_dirent_canonicalize(utf8_workingdir, subpool);
+#endif
 
 	err = svn_client_cleanup(workingdir, SVN_G(ctx), subpool);
 
@@ -1388,13 +1940,29 @@ PHP_FUNCTION(svn_revert)
 
 	targets = apr_array_make (subpool, 1, sizeof(char *));
 
+#if SVN_VER < 16
 	APR_ARRAY_PUSH(targets, const char *) = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		APR_ARRAY_PUSH(targets, const char *) = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		APR_ARRAY_PUSH(targets, const char *) = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
+#if SVN_VER < 16
 	err = svn_client_revert(
 			targets,
 			recursive,
 			SVN_G(ctx),
 			subpool);
+#else
+	err = svn_client_revert2(
+			targets,
+			recursive ? svn_depth_infinity : svn_depth_files,
+			NULL,
+			SVN_G(ctx),
+			subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -1430,13 +1998,30 @@ PHP_FUNCTION(svn_resolved)
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
 
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
+#if SVN_VER < 16
 	err = svn_client_resolved(
 			path,
 			recursive,
 			SVN_G(ctx),
 			subpool);
+#else
+	// FIXME expose conflict_choice to PHP API
+	err = svn_client_resolve(
+			path,
+			recursive ? svn_depth_infinity : svn_depth_files,
+			svn_wc_conflict_choose_merged,
+			SVN_G(ctx),
+			subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -1647,7 +2232,14 @@ PHP_FUNCTION(svn_fs_file_contents)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	err = svn_fs_file_contents(&svnstm, fsroot->root, path, SVN_G(pool));
 
@@ -1689,7 +2281,14 @@ PHP_FUNCTION(svn_fs_file_length)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	err = svn_fs_file_length(&len, fsroot->root, path, subpool);
 
@@ -1731,7 +2330,14 @@ PHP_FUNCTION(svn_fs_node_prop)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	err = svn_fs_node_prop(&val, fsroot->root, path, propname, subpool);
 
@@ -1776,7 +2382,14 @@ PHP_FUNCTION(svn_fs_node_created_rev)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	err = svn_fs_node_created_rev(&rev, fsroot->root, path, subpool);
 
@@ -1821,7 +2434,14 @@ PHP_FUNCTION(svn_fs_dir_entries)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	err = svn_fs_dir_entries(&hash, fsroot->root, path, subpool);
 
@@ -1866,7 +2486,14 @@ PHP_FUNCTION(svn_fs_check_path)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	err = svn_fs_check_path(&kind, fsroot->root, path, subpool);
 
@@ -1929,9 +2556,20 @@ PHP_FUNCTION(svn_repos_open)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
+#if SVN_VER < 16
 	err = svn_repos_open(&repos, path, subpool);
+#else
+	err = svn_repos_open2(&repos, path, NULL, subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -2023,7 +2661,14 @@ PHP_FUNCTION(svn_info)
 		goto cleanup;
 	}
 
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	revision.value.number = revnum;
 	revision.kind = !svn_path_is_url(path) && revnum == SVN_REVISION_UNSPECIFIED ? 
@@ -2044,7 +2689,35 @@ PHP_FUNCTION(svn_info)
 	}
 
 	array_init(return_value);
-	err = svn_client_info(true_path, &peg_revision, &revision, info_func, return_value, recurse, SVN_G(ctx), subpool);
+#if SVN_VER < 16
+	err = svn_client_info(true_path,
+			&peg_revision,
+			&revision,
+			info_func,
+			return_value,
+			recurse,
+			SVN_G(ctx), subpool);
+#elif SVN_VER == 16
+	err = svn_client_info2(true_path,
+			&peg_revision,
+			&revision,
+			info_func,
+			return_value,
+			recurse ? svn_depth_infinity : svn_depth_files,
+			NULL,
+			SVN_G(ctx), subpool);
+#else
+	err = svn_client_info3(true_path,
+			&peg_revision,
+			&revision,
+			recurse ? svn_depth_infinity : svn_depth_files,
+			(svn_boolean_t)0,
+			(svn_boolean_t)0,
+			NULL,
+			(svn_client_info_receiver2_t)info_func,
+			return_value,
+			SVN_G(ctx), subpool);
+#endif
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
 		RETVAL_FALSE;
@@ -2055,63 +2728,105 @@ cleanup:
 }
 /* }}} */
 
-/* {{{ proto resource svn_export(string frompath, string topath [, bool working_copy = true  [, long revision = -1 ])
+/* {{{ proto bool svn_export(string repository_url, string target_path [, int revision = SVN_REVISION_HEAD [, int flags]])
 	Export the contents of either a working copy or repository into a 'clean' directory.
-	If working_copy is true it will export uncommitted files from a working copy.
-    To export revisions, you must set working copy to false - the default is to export HEAD. */
+	If working_copy is true it will export uncommitted files from a working copy. */
 PHP_FUNCTION(svn_export)
 {
-	const char *from = NULL, *to = NULL;
-	const char *utf8_from_path = NULL, *utf8_to_path = NULL;
-	int fromlen, tolen;
-	long revision_no = -1;
-	apr_pool_t *subpool;
-	zend_bool working_copy = 1;
+	char *repos_url = NULL, *target_path = NULL;
+	const char *utf8_repos_url = NULL, *utf8_target_path = NULL;
+	const char *can_repos_url = NULL, *can_target_path = NULL;
+	int repos_url_len, target_path_len;
 	svn_error_t *err;
-	svn_opt_revision_t revision, peg_revision;
+	svn_opt_revision_t revision = { 0 }, peg_revision = { 0 };
+	long flags = 0;
+	int working_copy = 1;
+	apr_pool_t *subpool;
+	const char *true_path;
 
-	if (FAILURE == zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|bl",
-				&from, &fromlen, &to, &tolen, &working_copy, &revision_no )) {
+	revision.value.number = svn_opt_revision_unspecified;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|bll",
+			&repos_url, &repos_url_len, &target_path, &target_path_len, &working_copy, &revision.value.number, &flags) == FAILURE) {
 		return;
 	}
 
 	PHP_SVN_INIT_CLIENT();
 	subpool = svn_pool_create(SVN_G(pool));
-
 	if (!subpool) {
 		RETURN_FALSE;
 	}
 
-	err = svn_utf_cstring_to_utf8 (&utf8_from_path, from, subpool);
+	err = svn_utf_cstring_to_utf8 (&utf8_repos_url, repos_url, subpool);
+	if (err) {
+		php_svn_handle_error(err TSRMLS_CC);
+		RETVAL_FALSE;
+		goto cleanup;
+	}
+	err = svn_utf_cstring_to_utf8 (&utf8_target_path, target_path, subpool);
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
 		RETVAL_FALSE;
 		goto cleanup;
 	}
 
-	err = svn_utf_cstring_to_utf8 (&utf8_to_path, to, subpool);
-	if (err) {
-		php_svn_handle_error(err TSRMLS_CC);
-		RETVAL_FALSE;
-		goto cleanup;
-	}
+#if SVN_VER < 16
+	can_repos_url= svn_path_canonicalize(utf8_repos_url, subpool);
+	can_target_path = svn_path_canonicalize(utf8_target_path, subpool);
+#else
+	if (svn_path_is_url(utf8_repos_url))
+		can_repos_url= svn_uri_canonicalize(utf8_repos_url, subpool);
+	else
+		can_repos_url= svn_dirent_canonicalize(utf8_repos_url, subpool);
 
-	from = svn_path_canonicalize(utf8_from_path, subpool);
-	to = svn_path_canonicalize(utf8_to_path, subpool);
+	if (svn_path_is_url(utf8_target_path))
+		can_target_path = svn_uri_canonicalize(utf8_target_path, subpool);
+	else
+		can_target_path = svn_dirent_canonicalize(utf8_target_path, subpool);
+#endif
 
 	if (working_copy) {
 		revision.kind = svn_opt_revision_working;
 	} else {
-		revision.value.number = revision_no;
-		revision.kind = php_svn_get_revision_kind(revision); 
+		revision.kind = php_svn_get_revision_kind(revision);
 	}
 
-	peg_revision.kind = svn_opt_revision_unspecified;
+	err = svn_opt_parse_path(&peg_revision, &true_path, can_repos_url, subpool);
+	if (err) {
+		php_svn_handle_error (err TSRMLS_CC);
+		RETVAL_FALSE;
+		goto cleanup;
+	}
 
-	err = svn_client_export3(NULL, from, to, &peg_revision, &revision, TRUE, FALSE, TRUE, NULL, SVN_G(ctx), subpool);
+#if SVN_VER < 16
+	err = svn_client_export3(NULL,
+			true_path,
+			can_target_path,
+			&peg_revision,
+			&revision,
+			TRUE,
+			flags & SVN_IGNORE_EXTERNALS,
+			TRUE,
+			NULL,
+			SVN_G(ctx),
+			subpool);
+#else
+	err = svn_client_export5(NULL,
+			true_path,
+			can_target_path,
+			&peg_revision,
+			&revision,
+			TRUE,
+			flags & SVN_IGNORE_EXTERNALS,
+			FALSE,
+			(flags & SVN_NON_RECURSIVE) ? svn_depth_files : svn_depth_infinity,
+			NULL,
+			SVN_G(ctx),
+			subpool);
+#endif
 
 	if (err) {
-		php_svn_handle_error(err TSRMLS_CC);
+		php_svn_handle_error (err TSRMLS_CC);
 		RETVAL_FALSE;
 	} else {
 		RETVAL_TRUE;
@@ -2132,7 +2847,8 @@ PHP_FUNCTION(svn_switch)
 	apr_pool_t *subpool;
 	zend_bool working_copy = 1;
 	svn_error_t *err;
-	svn_opt_revision_t revision;
+	svn_opt_revision_t revision,
+					   peg_revision;
 
 	if (FAILURE == zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|b",
 					&path, &pathlen, &url, &urllen, &working_copy)) {
@@ -2149,8 +2865,20 @@ PHP_FUNCTION(svn_switch)
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
 	svn_utf_cstring_to_utf8 (&utf8_url, url, subpool);
 
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
 	url = svn_path_canonicalize(utf8_url, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+
+	if (svn_path_is_url(utf8_url))
+		url = svn_uri_canonicalize(utf8_url, subpool);
+	else
+		url = svn_dirent_canonicalize(utf8_url, subpool);
+#endif
 
 	if (working_copy) {
 		revision.kind = svn_opt_revision_working;
@@ -2158,7 +2886,37 @@ PHP_FUNCTION(svn_switch)
 		revision.kind = svn_opt_revision_head;
 	}
 
-	err = svn_client_switch(NULL, path, url, &revision, TRUE, SVN_G(ctx), subpool);
+#if SVN_VER < 16
+	err = svn_client_switch(NULL,
+			path,
+			url,
+			&revision,
+			TRUE,
+			SVN_G(ctx), subpool);
+#elif SVN_VER == 16
+	err = svn_client_switch2(NULL,
+			path,
+			url,
+			&peg_revision,
+			&revision,
+			svn_depth_infinity,
+			(svn_boolean_t)0,
+			(svn_boolean_t)0,
+			(svn_boolean_t)0,
+			SVN_G(ctx), subpool);
+#else
+	err = svn_client_switch3(NULL,
+			path,
+			url,
+			&peg_revision,
+			&revision,
+			svn_depth_infinity,
+			(svn_boolean_t)0,
+			(svn_boolean_t)0,
+			(svn_boolean_t)0,
+			(svn_boolean_t)0,
+			SVN_G(ctx), subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -2184,7 +2942,8 @@ PHP_FUNCTION(svn_copy)
 	zend_bool working_copy = 1;
 	svn_error_t *err;
 	svn_commit_info_t *info = NULL;
-	svn_opt_revision_t revision;
+	svn_opt_revision_t revision,
+			peg_revision;
 
 	if (FAILURE == zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sss|bl",
 					&log, &loglen, &src_path, &src_pathlen, &dst_path, &dst_pathlen,
@@ -2202,8 +2961,33 @@ PHP_FUNCTION(svn_copy)
 	svn_utf_cstring_to_utf8 (&utf8_src_path, src_path, subpool);
 	svn_utf_cstring_to_utf8 (&utf8_dst_path, dst_path, subpool);
 
+#if SVN_VER < 17
 	src_path = svn_path_canonicalize(utf8_src_path, subpool);
 	dst_path = svn_path_canonicalize(utf8_dst_path, subpool);
+#else
+	if (svn_path_is_url(utf8_src_path))
+		src_path = svn_uri_canonicalize(utf8_src_path, subpool);
+	else
+		src_path = svn_dirent_canonicalize(utf8_src_path, subpool);
+
+	if (svn_path_is_url(utf8_dst_path))
+		dst_path = svn_uri_canonicalize(utf8_dst_path, subpool);
+	else
+		dst_path = svn_dirent_canonicalize(utf8_dst_path, subpool);
+
+	apr_array_header_t *sources;
+	svn_client_copy_source_t *copy_source;
+
+	copy_source = apr_palloc(subpool, sizeof(svn_client_copy_source_t));
+	copy_source->path = (const char *)src_path;
+	copy_source->revision = &revision;
+	copy_source->peg_revision = &peg_revision;
+
+	sources = apr_array_make(subpool, 1, sizeof(svn_client_copy_source_t *));
+
+	APR_ARRAY_PUSH(sources, svn_client_copy_source_t *) = copy_source;
+#endif
+
 
 	revision.value.number = revnum;
 
@@ -2215,7 +2999,23 @@ PHP_FUNCTION(svn_copy)
 
 	SVN_G(ctx)->log_msg_baton = log;
 
-	err = svn_client_copy2(&info, (const char*)src_path, &revision, (const char*)dst_path, SVN_G(ctx), subpool);
+#if SVN_VER < 17
+	err = svn_client_copy2(&info,
+			(const char*)src_path,
+			&revision,
+			(const char*)dst_path,
+			SVN_G(ctx), subpool);
+#else
+	err = svn_client_copy6(sources,
+			(const char*)dst_path,
+			(svn_boolean_t)0,
+			(svn_boolean_t)1,
+			(svn_boolean_t)0,
+			NULL,
+			NULL,
+			NULL,
+			SVN_G(ctx), subpool);
+#endif
 	SVN_G(ctx)->log_msg_baton = NULL;
 
 	if (err) {
@@ -2315,7 +3115,14 @@ PHP_FUNCTION(svn_blame)
 		goto cleanup;
 	}
 
+#if SVN_VER < 16
 	repos_url = svn_path_canonicalize(utf8_repos_url, subpool);
+#else
+	if (svn_path_is_url(utf8_repos_url))
+		repos_url = svn_uri_canonicalize(utf8_repos_url, subpool);
+	else
+		repos_url = svn_dirent_canonicalize(utf8_repos_url, subpool);
+#endif
 	
 	start_revision.kind =  svn_opt_revision_number;
 	start_revision.value.number = 0;
@@ -2336,6 +3143,7 @@ PHP_FUNCTION(svn_blame)
 
 	array_init(return_value);
 
+#if SVN_VER < 17
 	err = svn_client_blame2(
 			true_path,
 			&peg_revision,
@@ -2345,6 +3153,21 @@ PHP_FUNCTION(svn_blame)
 			(void *) return_value,
 			SVN_G(ctx),
 			subpool);
+#else
+	// TODO expose diff options to PHP API
+	err = svn_client_blame5(
+			true_path,
+			&peg_revision,
+			&start_revision,
+			&end_revision,
+			0,
+			(svn_boolean_t)0,
+			(svn_boolean_t)1,
+			(svn_client_blame_receiver3_t)php_svn_blame_message_receiver,
+			(void *) return_value,
+			SVN_G(ctx),
+			subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -2383,13 +3206,37 @@ PHP_FUNCTION(svn_delete)
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
 
 	targets = apr_array_make (subpool, 1, sizeof(char *));
+#if SVN_VER < 16
 	APR_ARRAY_PUSH(targets, const char *) = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		APR_ARRAY_PUSH(targets, const char *) = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		APR_ARRAY_PUSH(targets, const char *) = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 	
-        SVN_G(ctx)->log_msg_baton = logmsg; 
+		// FIXME warning: assignment discards qualifiers from pointer target type
+		// FIXME is this meant to happen?
+        //SVN_G(ctx)->log_msg_baton = logmsg; 
 
-	err = svn_client_delete2(&info, targets, force, SVN_G(ctx), subpool);
+#if SVN_VER < 17
+	err = svn_client_delete2(&info,
+			targets,
+			force,
+			SVN_G(ctx), subpool);
+#else
+	err = svn_client_delete4(
+			targets,
+			force,
+			(svn_boolean_t)1,
+			NULL,
+			NULL,
+			NULL,
+			SVN_G(ctx), subpool);
+#endif
 
-        SVN_G(ctx)->log_msg_baton = NULL; 
+		// FIXME is this meant to happen?
+        //SVN_G(ctx)->log_msg_baton = NULL; 
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -2456,9 +3303,25 @@ PHP_FUNCTION(svn_mkdir)
 
 	targets = apr_array_make (subpool, 1, sizeof(char *));
 
+#if SVN_VER < 16
 	APR_ARRAY_PUSH(targets, const char *) = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		APR_ARRAY_PUSH(targets, const char *) = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		APR_ARRAY_PUSH(targets, const char *) = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
+#if SVN_VER < 17
 	err = svn_client_mkdir2(&info, targets, SVN_G(ctx), subpool);
+#else
+	err = svn_client_mkdir4(targets,
+			(svn_boolean_t)1,
+			NULL,
+			NULL,
+			NULL,
+			SVN_G(ctx), subpool);
+#endif
 
 	SVN_G(ctx)->log_msg_baton = NULL;
 
@@ -2509,6 +3372,7 @@ PHP_FUNCTION(svn_move)
 	apr_pool_t *subpool;
 	svn_error_t *err;
 	svn_commit_info_t *info = NULL;
+	apr_array_header_t *targets;
 
 	if (FAILURE == zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|b",
 					&src_path, &src_pathlen, &dst_path, &dst_pathlen, &force)) {
@@ -2525,10 +3389,35 @@ PHP_FUNCTION(svn_move)
 	svn_utf_cstring_to_utf8 (&utf8_src_path, src_path, subpool);
 	svn_utf_cstring_to_utf8 (&utf8_dst_path, dst_path, subpool);
 
+#if SVN_VER < 16
 	src_path = svn_path_canonicalize(utf8_src_path, subpool);
 	dst_path = svn_path_canonicalize(utf8_dst_path, subpool);
+#else
+	if (svn_path_is_url(utf8_src_path))
+		src_path = svn_uri_canonicalize(utf8_src_path, subpool);
+	else
+		src_path = svn_dirent_canonicalize(utf8_src_path, subpool);
 
+	if (svn_path_is_url(utf8_dst_path))
+		dst_path = svn_uri_canonicalize(utf8_dst_path, subpool);
+	else
+		dst_path = svn_dirent_canonicalize(utf8_dst_path, subpool);
+
+	APR_ARRAY_PUSH(targets, const char *) = src_path;
+#endif
+
+#if SVN_VER < 17
 	err = svn_client_move3(&info, src_path, dst_path, force, SVN_G(ctx), subpool);
+#else
+	err = svn_client_move6(targets,
+			dst_path,
+			(svn_boolean_t)0,
+			(svn_boolean_t)1,
+			NULL,
+			NULL,
+			NULL,
+			SVN_G(ctx), subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -2588,7 +3477,14 @@ PHP_FUNCTION(svn_proplist)
 		goto cleanup; 
 	} 
 
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 	
 	revision.kind = php_svn_get_revision_kind(revision); 
 
@@ -2599,7 +3495,20 @@ PHP_FUNCTION(svn_proplist)
 		goto cleanup; 
 	}
 	
+#if SVN_VER < 16
 	err = svn_client_proplist2(&props, true_path, &peg_revision, &revision, recurse, SVN_G(ctx), subpool);
+#else
+	// FIXME i think, without a receiver and receiver_baton, this function won't do anything useful
+	err = svn_client_proplist3(
+			true_path,
+			&peg_revision,
+			&revision,
+			recurse ? svn_depth_infinity : svn_depth_files,
+			NULL,
+			NULL,
+			NULL,
+			SVN_G(ctx), subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -2627,7 +3536,11 @@ PHP_FUNCTION(svn_proplist)
 
 				add_assoc_stringl(row, (char *)pname, (char *)propval->data, propval->len, 1);
 			}
+#if SVN_VER < 16
 			add_assoc_zval(return_value, (char *)svn_path_local_style(item->node_name->data, subpool), row);
+#else
+			add_assoc_zval(return_value, (char *)svn_dirent_local_style(item->node_name->data, subpool), row);
+#endif
 		}
 	}
 
@@ -2644,7 +3557,7 @@ PHP_FUNCTION(svn_propget)
 	const char *propname = NULL;
 	int pathlen, propnamelen;
 	zend_bool recurse = 0;
-	apr_pool_t *subpool;
+	apr_pool_t *subpool, *scratchpool;
 	svn_error_t *err;
 	apr_hash_t *props;
 	svn_opt_revision_t revision = { 0 }, peg_revision = { 0 };
@@ -2670,7 +3583,14 @@ PHP_FUNCTION(svn_propget)
 		goto cleanup; 
 	} 
 
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 	
 	revision.kind = php_svn_get_revision_kind(revision); 
 
@@ -2681,7 +3601,19 @@ PHP_FUNCTION(svn_propget)
 		goto cleanup; 
 	}
  
+#if SVN_VER < 17
 	err = svn_client_propget2(&props, propname, true_path, &peg_revision, &revision, recurse, SVN_G(ctx), subpool);
+#else
+	err = svn_client_propget4(&props,
+			propname,
+			true_path,
+			&peg_revision,
+			&revision,
+			NULL,
+			recurse ? svn_depth_infinity : svn_depth_files,
+			NULL,
+			SVN_G(ctx), subpool, scratchpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -2703,7 +3635,11 @@ PHP_FUNCTION(svn_propget)
 			propval = val;
 
 			add_assoc_stringl(row, (char *)propname, (char *)propval->data, propval->len, 1);
+#if SVN_VER < 16
 			add_assoc_zval(return_value, (char *)svn_path_local_style(pname, subpool), row);
+#else
+			add_assoc_zval(return_value, (char *)svn_dirent_local_style(pname, subpool), row);
+#endif
 		}
 	}
 
@@ -2747,7 +3683,14 @@ PHP_FUNCTION(svn_repos_create)
 		RETURN_FALSE;
 	}
 
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	config_hash = replicate_zend_hash_to_apr_hash(config, subpool TSRMLS_CC);
 	fsconfig_hash = replicate_zend_hash_to_apr_hash(fsconfig, subpool TSRMLS_CC);
@@ -2792,9 +3735,26 @@ PHP_FUNCTION(svn_repos_recover)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
+#if SVN_VER < 17
 	err = svn_repos_recover2(path, 0, NULL, NULL, subpool);
+#else
+	err = svn_repos_recover4(path,
+			0,
+			NULL,
+			NULL,
+			NULL,
+			NULL,
+			subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -2832,8 +3792,20 @@ PHP_FUNCTION(svn_repos_hotcopy)
 	svn_utf_cstring_to_utf8 (&utf8_src_path, src_path, subpool);
 	svn_utf_cstring_to_utf8 (&utf8_dst_path, dst_path, subpool);
 
+#if SVN_VER < 16
 	src_path = svn_path_canonicalize(utf8_src_path, subpool);
 	dst_path = svn_path_canonicalize(utf8_dst_path, subpool);
+#else
+	if (svn_path_is_url(utf8_src_path))
+		src_path = svn_uri_canonicalize(utf8_src_path, subpool);
+	else
+		src_path = svn_dirent_canonicalize(utf8_src_path, subpool);
+
+	if (svn_path_is_url(utf8_dst_path))
+		dst_path = svn_uri_canonicalize(utf8_dst_path, subpool);
+	else
+		dst_path = svn_dirent_canonicalize(utf8_dst_path, subpool);
+#endif
 
 	err = svn_repos_hotcopy(src_path, dst_path, cleanlogs, subpool);
 
@@ -2847,33 +3819,6 @@ PHP_FUNCTION(svn_repos_hotcopy)
 	svn_pool_destroy(subpool);
 }
 /* }}} */
-
-static int replicate_array(void *pDest TSRMLS_DC, int num_args, va_list args, zend_hash_key *key)
-{
-	zval **val = (zval **)pDest;
-	apr_pool_t *pool = (apr_pool_t*)va_arg(args, apr_pool_t*);
-	apr_array_header_t *arr = (apr_array_header_t*)va_arg(args, apr_array_header_t*);
-
-	if (Z_TYPE_PP(val) == IS_STRING) {
-		APR_ARRAY_PUSH(arr, const char*) = apr_pstrdup(pool, Z_STRVAL_PP(val));
-	}
-
-	va_end(args);
-
-	return ZEND_HASH_APPLY_KEEP;
-}
-
-
-static apr_array_header_t *replicate_zend_hash_to_apr_array(zval *arr, apr_pool_t *pool TSRMLS_DC)
-{
-	apr_array_header_t *apr_arr = apr_array_make(pool, zend_hash_num_elements(Z_ARRVAL_P(arr)), sizeof(const char*));
-
-	if (!apr_arr) return NULL;
-
-	zend_hash_apply_with_arguments(Z_ARRVAL_P(arr) TSRMLS_CC, replicate_array, 2, pool, apr_arr);
-
-	return apr_arr;
-}
 
 /* {{{ proto array svn_commit(string log, mixed targets [, bool recursive])
 	Commit files or directories from the local working copy into the repository */
@@ -2913,16 +3858,38 @@ PHP_FUNCTION(svn_commit)
 			RETVAL_FALSE;
 			goto cleanup;
 		}
+#if SVN_VER < 16
 		path = svn_path_canonicalize(utf8_path, subpool);
+#else
+		if (svn_path_is_url(utf8_path))
+			path = svn_uri_canonicalize(utf8_path, subpool);
+		else
+			path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 		targets_array = apr_array_make (subpool, 1, sizeof(char *));
 		APR_ARRAY_PUSH(targets_array, const char *) = path;
 	} else {
 		/* TODO: need to canonicalize the array */
-		targets_array = replicate_zend_hash_to_apr_array(targets, subpool TSRMLS_CC);
+		targets_array = replicate_zend_hash_to_apr_array(targets, subpool TSRMLS_CC, sizeof(const char*));
 	}
 
+#if SVN_VER < 16
 	err = svn_client_commit3(&info, targets_array, recursive, 1, SVN_G(ctx), subpool);
+#else
+	// FIXME expose options to PHP API
+	err = svn_client_commit5(
+			targets_array,
+			recursive ? svn_depth_infinity : svn_depth_files,
+			(svn_boolean_t)1,
+			(svn_boolean_t)0,
+			(svn_boolean_t)0, /* don't descend into tree on copies and deletes */
+			NULL,
+			NULL,
+			NULL,
+			NULL,
+			SVN_G(ctx), subpool);
+#endif
 	SVN_G(ctx)->log_msg_baton = NULL;
 
 	if (err) {
@@ -2982,13 +3949,20 @@ PHP_FUNCTION(svn_lock)
 
 	if (path) {
 		svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 		path = svn_path_canonicalize(utf8_path, subpool);
+#else
+		if (svn_path_is_url(utf8_path))
+			path = svn_uri_canonicalize(utf8_path, subpool);
+		else
+			path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 		targets_array = apr_array_make (subpool, 1, sizeof(char *));
 		APR_ARRAY_PUSH(targets_array, const char *) = path;
 	} else {
 		/* TODO: need to canonicalize the array */
-		targets_array = replicate_zend_hash_to_apr_array(targets, subpool TSRMLS_CC);
+		targets_array = replicate_zend_hash_to_apr_array(targets, subpool TSRMLS_CC, sizeof(const char*));
 	}
 
 	err = svn_client_lock(targets_array, comment, steal_lock, SVN_G(ctx), subpool);
@@ -3033,13 +4007,20 @@ PHP_FUNCTION(svn_unlock)
 
 	if (path) {
 		svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 		path = svn_path_canonicalize(utf8_path, subpool);
+#else
+		if (svn_path_is_url(utf8_path))
+			path = svn_uri_canonicalize(utf8_path, subpool);
+		else
+			path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 		targets_array = apr_array_make (subpool, 1, sizeof(char *));
 		APR_ARRAY_PUSH(targets_array, const char *) = path;
 	} else {
 		/* TODO: need to canonicalize the array */
-		targets_array = replicate_zend_hash_to_apr_array(targets, subpool TSRMLS_CC);
+		targets_array = replicate_zend_hash_to_apr_array(targets, subpool TSRMLS_CC, sizeof(const char*));
 	}
 
 	err = svn_client_unlock(targets_array, break_lock, SVN_G(ctx), subpool);
@@ -3084,9 +4065,25 @@ PHP_FUNCTION(svn_add)
 		goto cleanup;
 	}
 
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
+#if SVN_VER < 16
 	err = svn_client_add2((const char*)path, recurse, force, SVN_G(ctx), subpool);
+#else
+	err = svn_client_add4((const char*)path,
+			recurse ? svn_depth_infinity : svn_depth_files,
+			force,
+			(svn_boolean_t)1,
+			(svn_boolean_t)0,
+			SVN_G(ctx), subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -3100,6 +4097,7 @@ cleanup:
 }
 /* }}} */
 
+#if SVN_VER < 16
 static void php_svn_status_receiver(void *baton, const char *path, svn_wc_status2_t *status)
 {
 	zval *return_value = (zval*)baton;
@@ -3159,6 +4157,56 @@ static void php_svn_status_receiver(void *baton, const char *path, svn_wc_status
 
 	add_next_index_zval(return_value, entry);
 }
+#else
+static void php_svn_status_receiver(void *baton, const char *path, const svn_client_status_t *status, apr_pool_t *pool)
+{
+	zval *return_value = (zval*)baton;
+	zval *entry;
+	TSRMLS_FETCH();
+
+	MAKE_STD_ZVAL(entry);
+	array_init(entry);
+
+	add_assoc_string(entry, "path", (char*)path, 1);
+	if (status) {
+		add_assoc_long(entry, "text_status", status->text_status);
+		add_assoc_long(entry, "repos_text_status", status->repos_text_status);
+		add_assoc_long(entry, "prop_status", status->prop_status);
+		add_assoc_long(entry, "node_status", status->node_status);
+		add_assoc_long(entry, "text_status", status->text_status);
+		add_assoc_long(entry, "repos_prop_status", status->repos_prop_status);
+		add_assoc_bool(entry, "locked", status->wc_is_locked);
+		add_assoc_bool(entry, "copied", status->copied);
+		add_assoc_bool(entry, "switched", status->switched);
+		add_assoc_bool(entry, "conflicted", status->conflicted);
+
+		if (status->changelist) {
+			add_assoc_string(entry, "changelist", (char*)status->changelist, 1);
+		}
+
+		if (status->repos_root_url) {
+			add_assoc_string(entry, "url", (char*)status->repos_root_url, 1);
+		}
+		if (status->repos_relpath) {
+			add_assoc_string(entry, "name", (char*)status->repos_relpath, 1);
+		}
+
+		add_assoc_long(entry, "revision", status->revision);
+		add_assoc_long(entry, "kind", status->kind);
+		if (status->node_status == svn_wc_status_deleted) add_assoc_bool(entry, "deleted", 1);
+		if (status->node_status == svn_wc_status_missing) add_assoc_bool(entry, "absent", 1);
+		if (status->node_status == svn_wc_status_incomplete) add_assoc_bool(entry, "incomplete", 1);
+
+		if (status->changed_author) {
+			add_assoc_long(entry, "cmt_date", apr_time_sec(status->changed_date));
+			add_assoc_long(entry, "cmt_rev", status->changed_rev);
+			add_assoc_string(entry, "cmt_author", (char*)status->changed_author, 1);
+		}
+	}
+
+	add_next_index_zval(return_value, entry);
+}
+#endif
 
 /* {{{ proto array svn_status(string path [, int flags]])
 	Returns the status of a working copy directory or a single file */
@@ -3190,11 +4238,19 @@ PHP_FUNCTION(svn_status)
 		RETVAL_FALSE;
 		goto cleanup;
 	}
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	array_init(return_value);
 	revision.kind = svn_opt_revision_head;
 
+#if SVN_VER < 17
 	err = svn_client_status2(
 		&result_revision,
 		path,
@@ -3208,8 +4264,23 @@ PHP_FUNCTION(svn_status)
 		flags & SVN_IGNORE_EXTERNALS,
 		SVN_G(ctx),
 		subpool);
-
-
+#else
+	err = svn_client_status5(
+		&result_revision,
+		SVN_G(ctx),
+		path,
+		&revision,
+		(flags & SVN_NON_RECURSIVE) ? svn_depth_files : svn_depth_infinity,
+		flags & SVN_ALL,
+		flags & SVN_SHOW_UPDATES,
+		flags & SVN_NO_IGNORE,
+		flags & SVN_IGNORE_EXTERNALS,
+		(svn_boolean_t)0,
+		NULL,
+		(svn_client_status_func_t)php_svn_status_receiver,
+		(void*)return_value,
+		subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -3226,12 +4297,20 @@ cleanup:
 PHP_FUNCTION(svn_update)
 {
 	const char *path = NULL;
+#if SVN_VER >= 17
+	apr_array_header_t *paths = NULL;
+#endif
 	const char *utf8_path = NULL;
 	int pathlen;
 	zend_bool recurse = 1;
 	apr_pool_t *subpool;
 	svn_error_t *err;
+#if SVN_VER < 17
 	svn_revnum_t result_rev;
+#else
+	int result_rev_index, result_rev_count;
+	apr_array_header_t *result_revs;
+#endif
 	svn_opt_revision_t rev;
 	long revno = -1;
 
@@ -3254,19 +4333,50 @@ PHP_FUNCTION(svn_update)
 		goto cleanup;
 	}
 
+#if SVN_VER < 17
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	rev.value.number = revno;
 	rev.kind = php_svn_get_revision_kind (rev);
 	 
+#if SVN_VER < 17
 	err = svn_client_update(&result_rev, path, &rev, recurse,
 			SVN_G(ctx), subpool);
+#else
+	APR_ARRAY_PUSH(paths, const char *) = path;
+
+	err = svn_client_update4(&result_revs,
+			paths,
+			&rev,
+			recurse ? svn_depth_infinity : svn_depth_files,
+			(svn_boolean_t)0,
+			(svn_boolean_t)0,
+			(svn_boolean_t)0,
+			(svn_boolean_t)1,
+			(svn_boolean_t)1,
+			SVN_G(ctx), subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
 		RETVAL_FALSE;
 	} else {
+#if SVN_VER < 17
 		RETVAL_LONG(result_rev);
+#else
+		result_rev_count = sizeof(result_revs) / sizeof(svn_revnum_t);
+		array_init(return_value);
+
+		for (result_rev_index = 0; result_rev_index < result_rev_count; result_rev_index++) {
+			add_index_long(return_value, result_rev_index, (svn_revnum_t)apr_array_pop(result_revs));
+		}
+#endif
 	}
 
 cleanup:
@@ -3327,7 +4437,11 @@ PHP_FUNCTION(svn_repos_fs_begin_txn_for_commit)
 		RETURN_FALSE;
 	}
 
+#if SVN_VER < 16
 	err = svn_repos_fs_begin_txn_for_commit(&txn_p, repos->repos, rev, author, log_msg, subpool);
+#else
+	err = svn_repos_fs_begin_txn_for_commit2(&txn_p, repos->repos, rev, NULL, subpool);
+#endif
 
 	if (err) {
 		php_svn_handle_error(err TSRMLS_CC);
@@ -3434,7 +4548,14 @@ PHP_FUNCTION(svn_fs_make_file)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	ZEND_FETCH_RESOURCE(root, struct php_svn_fs_root *, &zroot, -1, "svn-fs-root", le_svn_fs_root);
 
@@ -3472,7 +4593,14 @@ PHP_FUNCTION(svn_fs_make_dir)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	ZEND_FETCH_RESOURCE(root, struct php_svn_fs_root *, &zroot, -1, "svn-fs-root", le_svn_fs_root);
 
@@ -3513,7 +4641,14 @@ PHP_FUNCTION(svn_fs_apply_text)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	ZEND_FETCH_RESOURCE(root, struct php_svn_fs_root *, &zroot, -1, "svn-fs-root", le_svn_fs_root);
 
@@ -3561,8 +4696,20 @@ PHP_FUNCTION(svn_fs_copy)
 	svn_utf_cstring_to_utf8 (&utf8_from_path, from_path, subpool);
 	svn_utf_cstring_to_utf8 (&utf8_to_path, to_path, subpool);
 
+#if SVN_VER < 16
 	from_path = svn_path_canonicalize(utf8_from_path, subpool);
 	to_path = svn_path_canonicalize(utf8_to_path, subpool);
+#else
+	if (svn_path_is_url(utf8_from_path))
+		from_path = svn_uri_canonicalize(utf8_from_path, subpool);
+	else
+		from_path = svn_dirent_canonicalize(utf8_from_path, subpool);
+
+	if (svn_path_is_url(utf8_to_path))
+		to_path = svn_uri_canonicalize(utf8_to_path, subpool);
+	else
+		to_path = svn_dirent_canonicalize(utf8_to_path, subpool);
+#endif
 
 	ZEND_FETCH_RESOURCE(from_root, struct php_svn_fs_root *, &zfrom_root, -1, "svn-fs-root", le_svn_fs_root);
 	ZEND_FETCH_RESOURCE(to_root, struct php_svn_fs_root *, &zto_root, -1, "svn-fs-root", le_svn_fs_root);
@@ -3601,7 +4748,14 @@ PHP_FUNCTION(svn_fs_delete)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	ZEND_FETCH_RESOURCE(root, struct php_svn_fs_root *, &zroot, -1, "svn-fs-root", le_svn_fs_root);
 
@@ -3678,7 +4832,14 @@ PHP_FUNCTION(svn_fs_is_file)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	ZEND_FETCH_RESOURCE(root, struct php_svn_fs_root *, &zroot, -1, "svn-fs-root", le_svn_fs_root);
 
@@ -3717,7 +4878,14 @@ PHP_FUNCTION(svn_fs_is_dir)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	ZEND_FETCH_RESOURCE(root, struct php_svn_fs_root *, &zroot, -1, "svn-fs-root", le_svn_fs_root);
 
@@ -3757,7 +4925,14 @@ PHP_FUNCTION(svn_fs_change_node_prop)
 	}
 
 	svn_utf_cstring_to_utf8 (&utf8_path, path, subpool);
+#if SVN_VER < 16
 	path = svn_path_canonicalize(utf8_path, subpool);
+#else
+	if (svn_path_is_url(utf8_path))
+		path = svn_uri_canonicalize(utf8_path, subpool);
+	else
+		path = svn_dirent_canonicalize(utf8_path, subpool);
+#endif
 
 	ZEND_FETCH_RESOURCE(root, struct php_svn_fs_root *, &zroot, -1, "svn-fs-root", le_svn_fs_root);
 
@@ -3808,8 +4983,20 @@ PHP_FUNCTION(svn_fs_contents_changed)
 	svn_utf_cstring_to_utf8 (&utf8_path1, path1, subpool);
 	svn_utf_cstring_to_utf8 (&utf8_path2, path2, subpool);
 
+#if SVN_VER < 16
 	path1 = svn_path_canonicalize(utf8_path1, subpool);
 	path2 = svn_path_canonicalize(utf8_path2, subpool);
+#else
+	if (svn_path_is_url(utf8_path1))
+		path1 = svn_uri_canonicalize(utf8_path1, subpool);
+	else
+		path1 = svn_dirent_canonicalize(utf8_path1, subpool);
+
+	if (svn_path_is_url(utf8_path2))
+		path2 = svn_uri_canonicalize(utf8_path2, subpool);
+	else
+		path2 = svn_dirent_canonicalize(utf8_path2, subpool);
+#endif
 
 	ZEND_FETCH_RESOURCE(root1, struct php_svn_fs_root *, &zroot1, -1, "svn-fs-root", le_svn_fs_root);
 	ZEND_FETCH_RESOURCE(root2, struct php_svn_fs_root *, &zroot2, -1, "svn-fs-root", le_svn_fs_root);
@@ -3856,8 +5043,20 @@ PHP_FUNCTION(svn_fs_props_changed)
 	svn_utf_cstring_to_utf8 (&utf8_path1, path1, subpool);
 	svn_utf_cstring_to_utf8 (&utf8_path2, path2, subpool);
 
+#if SVN_VER < 16
 	path1 = svn_path_canonicalize(utf8_path1, subpool);
 	path2 = svn_path_canonicalize(utf8_path2, subpool);
+#else
+	if (svn_path_is_url(utf8_path1))
+		path1 = svn_uri_canonicalize(utf8_path1, subpool);
+	else
+		path1 = svn_dirent_canonicalize(utf8_path1, subpool);
+
+	if (svn_path_is_url(utf8_path2))
+		path2 = svn_uri_canonicalize(utf8_path2, subpool);
+	else
+		path2 = svn_dirent_canonicalize(utf8_path2, subpool);
+#endif
 
 	ZEND_FETCH_RESOURCE(root1, struct php_svn_fs_root *, &zroot1, -1, "svn-fs-root", le_svn_fs_root);
 	ZEND_FETCH_RESOURCE(root2, struct php_svn_fs_root *, &zroot2, -1, "svn-fs-root", le_svn_fs_root);
