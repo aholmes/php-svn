@@ -4,8 +4,10 @@ You can use this module with Subversion 1.7.
 
 This module adds support for the svn_merge() method. It's signature is as follows.
 
-  svn_merge('source url', 'target url') // merge all missing revisions
+	svn_merge('source url', 'target url') // merge all missing revisions
+	
 	svn_merge('source url', 'target url', revision) // merge one revision
+	
 	svn_merge('source url', 'target url', revision, end_revision) // merge range of revisions
 
 	svn_merge('source url', 'target url', array(revision1, revision2, ...)) // merge array of revisions
